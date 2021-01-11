@@ -1,9 +1,11 @@
 # EXTERNAL LIBRARIES
 import numpy as np
-import scipy
+from PIL import Image
+from torchvision import transforms
+import argparse
 
 import torch
-import torch.nn as nn
+import pandas as pd
 import torch.optim as optim
 assert float(torch.__version__[:3]) >= 0.3
 
@@ -15,152 +17,188 @@ if module_path not in sys.path:
     sys.path.append(module_path)
 
 # mister_ed
-# import config
-# import prebuilt_loss_functions as plf
-# import utils.image_utils as img_utils
-# import cifar10.cifar_resnets as cifar_resnets
-# import adversarial_training as advtrain
-# import adversarial_evaluation as adveval
-# import utils.checkpoints as checkpoints
-# import spatial_transformers as st
-import loss_functions as lf
-import utils.pytorch_utils as utils
-import cifar10.cifar_loader as cifar_loader
-import adversarial_perturbations as ap
-import adversarial_attacks as aa
-import cv2
-import torchvision.transforms as T
+import recoloradv.mister_ed.loss_functions as lf
+import recoloradv.mister_ed.utils.pytorch_utils as utils
+import recoloradv.mister_ed.adversarial_perturbations as ap
+import recoloradv.mister_ed.adversarial_attacks as aa
 
 # ReColorAdv
-import perturbations as pt
-import color_transformers as ct
-import color_spaces as cs
-import norms
+import recoloradv.perturbations as pt
+import recoloradv.color_transformers as ct
+import recoloradv.color_spaces as cs
 
-# Quick check to ensure cifar 10 data and pretrained classifiers are loaded
-cifar_valset = cifar_loader.load_cifar_data('val')
-model, normalizer = cifar_loader.load_pretrained_cifar_resnet(flavor=32, return_normalizer=True)
+# CIFAR10
+from cifar10_models import *
 
-cifar_valset = cifar_loader.load_cifar_data('val', batch_size=500, shuffle=False)
-examples, labels = next(iter(cifar_valset))
+# Preprocessed
+def pre(img):
+    trans = transforms.Compose([transforms.ToTensor()])
 
-model, normalizer = cifar_loader.load_pretrained_cifar_resnet(flavor=32, return_normalizer=True)
-target_model_1, normalizer = cifar_loader.load_pretrained_cifar_resnet(flavor=44, return_normalizer=True)
-target_model_2, normalizer = cifar_loader.load_pretrained_cifar_resnet(flavor=56, return_normalizer=True)
-target_model_3, normalizer = cifar_loader.load_pretrained_cifar_resnet(flavor=110, return_normalizer=True)
+    return trans(img)
 
-torch.backends.cudnn.deterministic = True
+def main(args):
+    # Source model
+    if args.model == 'resnet50':
+        model = resnet50(pretrained=True)
+    elif args.model == 'vgg16':
+        model = vgg16_bn(pretrained=True)
+    elif args.model == 'inceptionv3':
+        model = inception_v3(pretrained=True)
+    else:
+        raise NotImplementedError('{} is not allowed!'.format(args.model))
 
-if utils.use_gpu():
-    examples = examples.cuda()
-    labels = labels.cuda()
-    model.cuda()
-    target_model_1.cuda()
-    target_model_2.cuda()
-    target_model_3.cuda()
+    model.eval()
+    if torch.cuda.is_available():
+        model.cuda()
 
-# img_utils.show_images(examples)
+    # Target model
+    target_model_1 = resnet50(pretrained=True)
+    target_model_2 = resnet18(pretrained=True)
+    target_model_3 = vgg16_bn(pretrained=True)
+    target_model_4 = densenet121(pretrained=True)
+    target_model_5 = googlenet(pretrained=True)
+    target_model_6 = mobilenet_v2(pretrained=True)
+    target_model_7 = inception_v3(pretrained=True)
 
-# This threat model defines the regularization parameters of the attack.
-# recoloradv_threat = ap.ThreatModel(pt.ReColorAdv, {
-#     'xform_class': ct.FullSpatial,
-#     'cspace': cs.CIELUVColorSpace(), # controls the color space used
-#     'lp_style': 'inf',
-#     'lp_bound': [0.06, 0.06, 0.06],  # [epsilon_1, epsilon_2, epsilon_3]
-#     'xform_params': {
-#       'resolution_x': 16,            # R_1
-#       'resolution_y': 32,            # R_2
-#       'resolution_z': 32,            # R_3
-#     },
-#     'use_smooth_loss': True,
-# })
-recoloradv_threat = ap.ThreatModel(pt.ReColorAdv, {
-    'xform_class': ct.FullSpatial,
-    'cspace': cs.RGBColorSpace(), # controls the color space used
-    'lp_style': 'inf',
-    'lp_bound': 0.047,  # [epsilon_1, epsilon_2, epsilon_3]
-    'xform_params': {
-      'resolution_x': 25,            # R_1
-      'resolution_y': 25,            # R_2
-      'resolution_z': 25,            # R_3
-    },
-    'use_smooth_loss': True,
-})
+    target_model_1.eval()
+    target_model_2.eval()
+    target_model_3.eval()
+    target_model_4.eval()
+    target_model_5.eval()
+    target_model_6.eval()
+    target_model_7.eval()
 
+    target_model_1 = target_model_1.cuda()
+    target_model_2 = target_model_2.cuda()
+    target_model_3 = target_model_3.cuda()
+    target_model_4 = target_model_4.cuda()
+    target_model_5 = target_model_5.cuda()
+    target_model_6 = target_model_6.cuda()
+    target_model_7 = target_model_7.cuda()
 
-# Now, we define the main optimization term (the Carlini & Wagner f6 loss).
-adv_loss = lf.CWLossF6(model, normalizer)
+    recoloradv_threat = ap.ThreatModel(pt.ReColorAdv, {
+        'xform_class': ct.FullSpatial,
+        'cspace': cs.RGBColorSpace(), # controls the color space used
+        'lp_style': 'inf',
+        'lp_bound': 0.047,  # [epsilon_1, epsilon_2, epsilon_3]
+        'xform_params': {
+          'resolution_x': 25,            # R_1
+          'resolution_y': 25,            # R_2
+          'resolution_z': 25,            # R_3
+        },
+        'use_smooth_loss': True,
+    })
 
-# We also need the smoothness loss.
-smooth_loss = lf.PerturbationNormLoss(lp=2)
+    # Attack Model
+    normalizer = utils.DifferentiableNormalize(mean=[0.4914, 0.4822, 0.4465],
+                                               std=[0.2023, 0.1994, 0.2010])
 
-# We combine them with a RegularizedLoss object.
-attack_loss = lf.RegularizedLoss({'adv': adv_loss, 'smooth': smooth_loss},
-                                 {'adv': 1.0,      'smooth': 0.05},   # lambda = 0.05
-                                 negate=True) # Need this true for PGD type attacks
+    # Now, we define the main optimization term (the Carlini & Wagner f6 loss).
+    adv_loss = lf.CWLossF6(model, normalizer)
 
-# PGD is used to optimize the above loss.
-pgd_attack_obj = aa.PGD(model, normalizer, recoloradv_threat, attack_loss)
+    # We also need the smoothness loss.
+    smooth_loss = lf.PerturbationNormLoss(lp=2)
 
-# We run the attack for 10 iterations at learning rate 0.01.
-perturbation = pgd_attack_obj.attack(examples, labels, num_iterations=10, signed=False,
-                                     optimizer=optim.Adam, optimizer_kwargs={'lr': 0.01},
-                                     verbose=True)
+    # We combine them with a RegularizedLoss object.
+    attack_loss = lf.RegularizedLoss({'adv': adv_loss, 'smooth': smooth_loss},
+                                     {'adv': 1.0,      'smooth': 0.05},   # lambda = 0.05
+                                     negate=True) # Need this true for PGD type attacks
 
-# Now, we can collect the successful adversarial examples and display them.
-successful_advs, successful_origs, idxs = perturbation.collect_successful(model, normalizer,labels)
-# successful_diffs = ((successful_advs - successful_origs) * 3 + 0.5).clamp(0, 1)
-# img_utils.show_images([successful_origs, successful_advs, successful_diffs])
-print(len(successful_advs))
+    # PGD is used to optimize the above loss.
+    pgd_attack_obj = aa.PGD(model, normalizer, recoloradv_threat, attack_loss)
 
-num = 0
-j = 0
+    # Images Prepare
+    df = pd.read_csv('/media/yoga/DATA/Project/Adversarial_Attack_cifar10/cifar10_{}.csv'.format(args.iter_num))
+    # df = pd.read_csv('/data2/YogaData/Adversarial_Attack_ImageNet/selected_list_{}.csv'.format(args.iter_num))
+    files = df['filename'].values
+    truth = df['groundtruth'].values
 
-label = torch.index_select(labels, 0, idxs)
+    S = 0
+    T = np.zeros(7)  # transferability
+    total = len(files)
 
-# ResNet 44
-new_out = torch.max(target_model_1(normalizer(successful_advs)), 1)[1]
-adv_idx_bytes = new_out != label
-print(adv_idx_bytes.sum())
+    for i in range(len(files)):
+        # print(i)
+        if i % 100 == 0:
+            print(i, S, T)
 
-# ResNet 56
-new_out = torch.max(target_model_2(normalizer(successful_advs)), 1)[1]
-adv_idx_bytes = new_out != label
-print(adv_idx_bytes.sum())
+        img_path = '/media/yoga/DATA/Project/Adversarial_Attack_cifar10/cifar10_{}/'.format(args.iter_num) + files[i]
+        # img_path = '/data2/YogaData/Adversarial_Attack_ImageNet/val_data_{}/'.format(args.iter_num) + files[i]
+        examples = Image.open(img_path).convert("RGB")
+        examples = pre(examples).unsqueeze(0)
 
-# ResNet 110
-new_out = torch.max(target_model_3(normalizer(successful_advs)), 1)[1]
-adv_idx_bytes = new_out != label
-print(adv_idx_bytes.sum())
+        labels = torch.ones(1) * int(truth[i])
+        labels = labels.long()
 
-# import csv
-# with open('Color.csv', 'w') as f:
-#     w = csv.writer(f)
-#     w.writerow(['Num', 'point to point', 'distance to boundary', '44', '44-0', '56', '56-0', '110', '110-0'])
+        if torch.cuda.is_available():
+            examples = examples.cuda()
+            labels = labels.cuda()
 
-# for i in range(100):
-#
-#     from boundary_to_boundary import boundary_to_boundary
-#
-#     p2p, p2b1, b2b1 = boundary_to_boundary(successful_origs[i].unsqueeze(0), successful_advs[i].unsqueeze(0), model, target_model_1, normalizer)
-#     if b2b1 < 0:
-#         temp1 = 0
-#     else:
-#         temp1 = b2b1
-#
-#     p2p, p2b2, b2b2 = boundary_to_boundary(successful_origs[i].unsqueeze(0), successful_advs[i].unsqueeze(0), model, target_model_2, normalizer)
-#     if b2b2 < 0:
-#         temp2 = 0
-#     else:
-#         temp2 = b2b2
-#
-#     p2p, p2b3, b2b3 = boundary_to_boundary(successful_origs[i].unsqueeze(0), successful_advs[i].unsqueeze(0), model, target_model_3, normalizer)
-#     if b2b3 < 0:
-#         temp3 = 0
-#     else:
-#         temp3 = b2b3
-#
-#     with open('Color.csv', 'a') as f:
-#         w = csv.writer(f)
-#         w.writerow([str(i), float(p2p), float(p2b1), float(b2b1), float(temp1), float(b2b2), float(temp2), float(b2b3), float(temp3)])
+        # We run the attack for 10 iterations at learning rate 0.01.
+        adv_inputs = pgd_attack_obj.attack(examples, labels, num_iterations=10, signed=False,
+                                             optimizer=optim.Adam, optimizer_kwargs={'lr': 0.01},
+                                             verbose=False).adversarial_tensors()
+
+        with torch.no_grad():
+            adv_logits = model(normalizer(adv_inputs))
+
+        # if org_logits.argmax(1) == labels and not adv_logits.argmax(1) == labels:
+        if not adv_logits.argmax(1) == labels:
+            S += 1
+            # save_res(inputs, adv_inputs, files[i])
+            # print(S)
+
+            # Transferability
+            pred_trans = target_model_1(normalizer(adv_inputs))
+            _, cls = pred_trans.data.max(1)
+            if not int(cls.cpu()) == truth[i]:
+                T[0] += 1
+
+            pred_trans = target_model_2(normalizer(adv_inputs))
+            _, cls = pred_trans.data.max(1)
+            if not int(cls.cpu()) == truth[i]:
+                T[1] += 1
+
+            pred_trans = target_model_3(normalizer(adv_inputs))
+            _, cls = pred_trans.data.max(1)
+            if not int(cls.cpu()) == truth[i]:
+                T[2] += 1
+
+            pred_trans = target_model_4(normalizer(adv_inputs))
+            _, cls = pred_trans.data.max(1)
+            if not int(cls.cpu()) == truth[i]:
+                T[3] += 1
+
+            pred_trans = target_model_5(normalizer(adv_inputs))
+            _, cls = pred_trans.data.max(1)
+            if not int(cls.cpu()) == truth[i]:
+                T[4] += 1
+
+            pred_trans = target_model_6(normalizer(adv_inputs))
+            _, cls = pred_trans.data.max(1)
+            if not int(cls.cpu()) == truth[i]:
+                T[5] += 1
+
+            pred_trans = target_model_7(normalizer(adv_inputs))
+            _, cls = pred_trans.data.max(1)
+            if not int(cls.cpu()) == truth[i]:
+                T[6] += 1
+
+        print(total, S, T)
+
+        import csv
+
+        with open("./ColorAdv_{}_cifar.csv".format(args.model), "a") as csvfile:
+            writer = csv.writer(csvfile)
+            writer.writerow(
+                [float(100.0 * S / total), float(100.0 * T[0] / S), float(100.0 * T[1] / S), float(100.0 * T[2] / S),
+                 float(100.0 * T[3] / S), float(100.0 * T[4] / S), float(100.0 * T[5] / S), float(100.0 * T[6] / S)])
+
+if __name__=='__main__':
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--model', help='resnet50, vgg16, inceptionv3', type=str, default='resnet50')
+    parser.add_argument('--iter_num', type=int, default='1')
+    args = parser.parse_args()
+
+    main(args)
 

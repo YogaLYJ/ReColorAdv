@@ -47,7 +47,6 @@ device = 'cuda' if torch.cuda.is_available() else 'cpu'
 
 def pre(img):
     trans = transforms.Compose([transforms.ToTensor()])
-
     return trans(img)
 
 
@@ -75,6 +74,7 @@ def main(args):
 
     source_model.eval()
     source_model.to(device)
+    # print("source_model", next(source_model.parameters()).is_cuda)
 
     total = 0
     model_list = []
@@ -138,25 +138,24 @@ def main(args):
     image_list = [f for f in os.listdir(
         args.dataset) if os.path.isfile(os.path.join(args.dataset, f))]
 
-    for img_name in tqdm(image_list[:4]):
+    for img_name in tqdm(image_list):
         # print(i)
         # if i % 100 == 0:
         #     print(i, S, T)
         im_orig = Image.open(os.path.join(
             args.dataset, img_name)).convert("RGB")
-        im = pre(im_orig).unsqueeze(0)
-        im.to(device)
+        im = pre(im_orig).to(device)
         labels = truth[img_name]
 
         # We run the attack for 10 iterations at learning rate 0.01.
-        adv_inputs = pgd_attack_obj.attack(im, labels, num_iterations=10,
-                                           signed=False, optimizer=optim.Adam,
+        adv_inputs = pgd_attack_obj.attack(im.unsqueeze(0), (torch.ones(1) * labels).long().to(device),
+                                           num_iterations=10, signed=False, optimizer=optim.Adam,
                                            optimizer_kwargs={'lr': 0.01},
                                            verbose=False).adversarial_tensors()
 
         with torch.no_grad():
             adv_logits = source_model(normalizer(adv_inputs))
-        print(adv_logits)
+
         # if org_logits.argmax(1) == labels and not adv_logits.argmax(1) == labels:
         if not adv_logits.argmax(1) == labels:
             total += 1
@@ -205,11 +204,14 @@ if __name__ == '__main__':
     parser.add_argument('--trial', type=int, default=1, help='trial num')
     parser.add_argument('--save_fig', default=False, action='store_true',
                         help='store figure')
-    parser = argparse.ArgumentParser()
     args = parser.parse_args()
 
     if args.save_path is None:
-        args.save_path = os.path.join("Save", args.dataset.split('/')[-1],
-                                      f"{args.model}", f"attack_{args.trial}")
+        args.save_path = os.path.join("Save", f"{args.model}",
+                                      args.dataset.split('/')[-1],
+                                      f"attack_{args.trial}")
+    if not os.path.exists(args.save_path):
+        os.makedirs(args.save_path)
+    print(f'Save {args.save_path}')
 
     main(args)

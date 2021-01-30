@@ -1,90 +1,116 @@
 # EXTERNAL LIBRARIES
-import numpy as np
-from PIL import Image
-from torchvision import transforms
 import argparse
-
-import torch
-import pandas as pd
-import torch.optim as optim
-assert float(torch.__version__[:3]) >= 0.3
-
-# Add local libraries to the pythonpath
 import os
 import sys
-module_path = os.path.abspath('mister_ed')
-if module_path not in sys.path:
-    sys.path.append(module_path)
 
-# mister_ed
+import numpy as np
+import pandas as pd
+import torch
+import torch.optim as optim
+from PIL import Image
+from tqdm import tqdm
+import cv2
+
+from torchvision import transforms
+
+import recoloradv.color_spaces as cs
+import recoloradv.color_transformers as ct
+import recoloradv.mister_ed.adversarial_attacks as aa
+import recoloradv.mister_ed.adversarial_perturbations as ap
 import recoloradv.mister_ed.loss_functions as lf
 import recoloradv.mister_ed.utils.pytorch_utils as utils
-import recoloradv.mister_ed.adversarial_perturbations as ap
-import recoloradv.mister_ed.adversarial_attacks as aa
-
-# ReColorAdv
 import recoloradv.perturbations as pt
-import recoloradv.color_transformers as ct
-import recoloradv.color_spaces as cs
+from cifar10_models.cifar10_models import (densenet121, googlenet,
+                                           inception_v3, mobilenet_v2,
+                                           resnet18, resnet50, vgg16_bn)
 
-# CIFAR10
-from cifar10_models import *
+# module_path = os.path.abspath('mister_ed')
+# if module_path not in sys.path:
+#     sys.path.append(module_path)
 
-# Preprocessed
+
+def tensor2cv2(t):
+    """
+    converts the pytorch tensor to img by transposing the tensor and normalizing it
+    :param t: input tensor
+    :return: numpy array with last dim be the channels and all values in range [0, 1]
+    """
+    t_np = t.detach().cpu().numpy().transpose(1, 2, 0)
+    t_np = (t_np - t_np.min()) / (t_np.max() - t_np.min())
+    t_np *= 255
+    t_np = cv2.cvtColor(t_np, cv2.COLOR_RGB2BGR)
+    return t_np
+
+
+device = 'cuda' if torch.cuda.is_available() else 'cpu'
+
+
 def pre(img):
     trans = transforms.Compose([transforms.ToTensor()])
 
     return trans(img)
 
+
 def main(args):
+    ############ Ground Truth #########################
+    df = pd.read_csv(args.gt)
+    image_list = df['filename'].values
+    # truth = df['groundtruth'].values
+    truth = dict(zip(image_list, df['groundtruth'].values))
+
+    # set random seed
+    torch.manual_seed(args.trial)
+    np.random.seed(args.trial)
+    torch.backends.cudnn.deterministic = True
+
     # Source model
     if args.model == 'resnet50':
-        model = resnet50(pretrained=True)
+        source_model = resnet50(pretrained=True)
     elif args.model == 'vgg16':
-        model = vgg16_bn(pretrained=True)
+        source_model = vgg16_bn(pretrained=True)
     elif args.model == 'inceptionv3':
-        model = inception_v3(pretrained=True)
+        source_model = inception_v3(pretrained=True)
     else:
         raise NotImplementedError('{} is not allowed!'.format(args.model))
 
-    model.eval()
-    if torch.cuda.is_available():
-        model.cuda()
+    source_model.eval()
+    source_model.to(device)
 
-    # Target model
-    target_model_1 = resnet50(pretrained=True)
-    target_model_2 = resnet18(pretrained=True)
-    target_model_3 = vgg16_bn(pretrained=True)
-    target_model_4 = densenet121(pretrained=True)
-    target_model_5 = googlenet(pretrained=True)
-    target_model_6 = mobilenet_v2(pretrained=True)
-    target_model_7 = inception_v3(pretrained=True)
+    total = 0
+    model_list = []
 
-    target_model_1.eval()
-    target_model_2.eval()
-    target_model_3.eval()
-    target_model_4.eval()
-    target_model_5.eval()
-    target_model_6.eval()
-    target_model_7.eval()
+    model_name = ["resnet50", "resnet18", "vgg16", "densenet121",
+                  "googlenet", "mobilenet_v2", "inception_v3"]
 
-    target_model_1 = target_model_1.cuda()
-    target_model_2 = target_model_2.cuda()
-    target_model_3 = target_model_3.cuda()
-    target_model_4 = target_model_4.cuda()
-    target_model_5 = target_model_5.cuda()
-    target_model_6 = target_model_6.cuda()
-    target_model_7 = target_model_7.cuda()
+    if "resnet50" in model_name:
+        model_list.append(resnet50(pretrained=True))
+    if "resnet18" in model_name:
+        model_list.append(resnet18(pretrained=True))
+    if "vgg16" in model_name:
+        model_list.append(vgg16_bn(pretrained=True))
+    if "densenet121" in model_name:
+        model_list.append(densenet121(pretrained=True))
+    if "googlenet" in model_name:
+        model_list.append(googlenet(pretrained=True))
+    if "mobilenet_v2" in model_name:
+        model_list.append(mobilenet_v2(pretrained=True))
+    if "inception_v3" in model_name:
+        model_list.append(inception_v3(pretrained=True))
+
+    [model.eval() for model in model_list]
+    [model.to(device) for model in model_list]
+    trans = np.zeros(len(model_list))
+    sr = np.zeros(len(model_list))
 
     recoloradv_threat = ap.ThreatModel(pt.ReColorAdv, {
         'xform_class': ct.FullSpatial,
-        'cspace': cs.RGBColorSpace(), # controls the color space used
+        'cspace': cs.RGBColorSpace(),  # controls the color space used
         'lp_style': 'inf',
         'lp_bound': 0.047,  # [epsilon_1, epsilon_2, epsilon_3]
         'xform_params': {
-          'resolution_x': 25,            # R_1
-          'resolution_y': 25,            # R_2
-          'resolution_z': 25,            # R_3
+            'resolution_x': 25,            # R_1
+            'resolution_y': 25,            # R_2
+            'resolution_z': 25,            # R_3
         },
         'use_smooth_loss': True,
     })
@@ -94,111 +120,96 @@ def main(args):
                                                std=[0.2023, 0.1994, 0.2010])
 
     # Now, we define the main optimization term (the Carlini & Wagner f6 loss).
-    adv_loss = lf.CWLossF6(model, normalizer)
+    adv_loss = lf.CWLossF6(source_model, normalizer)
 
     # We also need the smoothness loss.
     smooth_loss = lf.PerturbationNormLoss(lp=2)
 
     # We combine them with a RegularizedLoss object.
     attack_loss = lf.RegularizedLoss({'adv': adv_loss, 'smooth': smooth_loss},
-                                     {'adv': 1.0,      'smooth': 0.05},   # lambda = 0.05
-                                     negate=True) # Need this true for PGD type attacks
+                                     # lambda = 0.05
+                                     {'adv': 1.0,      'smooth': 0.05},
+                                     negate=True)  # Need this true for PGD type attacks
 
     # PGD is used to optimize the above loss.
-    pgd_attack_obj = aa.PGD(model, normalizer, recoloradv_threat, attack_loss)
+    pgd_attack_obj = aa.PGD(source_model, normalizer,
+                            recoloradv_threat, attack_loss)
 
-    # Images Prepare
-    df = pd.read_csv('/media/yoga/DATA/Project/Adversarial_Attack_cifar10/cifar10_{}.csv'.format(args.iter_num))
-    # df = pd.read_csv('/data2/YogaData/Adversarial_Attack_ImageNet/selected_list_{}.csv'.format(args.iter_num))
-    files = df['filename'].values
-    truth = df['groundtruth'].values
+    image_list = [f for f in os.listdir(
+        args.dataset) if os.path.isfile(os.path.join(args.dataset, f))]
 
-    S = 0
-    T = np.zeros(7)  # transferability
-    total = len(files)
-
-    for i in range(len(files)):
+    for img_name in tqdm(image_list[:4]):
         # print(i)
-        if i % 100 == 0:
-            print(i, S, T)
-
-        img_path = '/media/yoga/DATA/Project/Adversarial_Attack_cifar10/cifar10_{}/'.format(args.iter_num) + files[i]
-        # img_path = '/data2/YogaData/Adversarial_Attack_ImageNet/val_data_{}/'.format(args.iter_num) + files[i]
-        examples = Image.open(img_path).convert("RGB")
-        examples = pre(examples).unsqueeze(0)
-
-        labels = torch.ones(1) * int(truth[i])
-        labels = labels.long()
-
-        if torch.cuda.is_available():
-            examples = examples.cuda()
-            labels = labels.cuda()
+        # if i % 100 == 0:
+        #     print(i, S, T)
+        im_orig = Image.open(os.path.join(
+            args.dataset, img_name)).convert("RGB")
+        im = pre(im_orig).unsqueeze(0)
+        im.to(device)
+        labels = truth[img_name]
 
         # We run the attack for 10 iterations at learning rate 0.01.
-        adv_inputs = pgd_attack_obj.attack(examples, labels, num_iterations=10, signed=False,
-                                             optimizer=optim.Adam, optimizer_kwargs={'lr': 0.01},
-                                             verbose=False).adversarial_tensors()
+        adv_inputs = pgd_attack_obj.attack(im, labels, num_iterations=10,
+                                           signed=False, optimizer=optim.Adam,
+                                           optimizer_kwargs={'lr': 0.01},
+                                           verbose=False).adversarial_tensors()
 
         with torch.no_grad():
-            adv_logits = model(normalizer(adv_inputs))
-
+            adv_logits = source_model(normalizer(adv_inputs))
+        print(adv_logits)
         # if org_logits.argmax(1) == labels and not adv_logits.argmax(1) == labels:
         if not adv_logits.argmax(1) == labels:
-            S += 1
+            total += 1
+            if args.save_fig:
+                cv2.imwrite(os.path.join(args.save_path, img_name),
+                            tensor2cv2(adv_inputs.squeeze()))
+
             # save_res(inputs, adv_inputs, files[i])
             # print(S)
 
             # Transferability
-            pred_trans = target_model_1(normalizer(adv_inputs))
-            _, cls = pred_trans.data.max(1)
-            if not int(cls.cpu()) == truth[i]:
-                T[0] += 1
+            adv_inputs = normalizer(adv_inputs)
+            for i, model in enumerate(model_list):
+                pred_trans = model(adv_inputs).detach().cpu().numpy()
+                pred_target_lbl_adv = np.argmax(pred_trans, 1)
+                if not pred_target_lbl_adv == labels:
+                    trans[i] += 1
 
-            pred_trans = target_model_2(normalizer(adv_inputs))
-            _, cls = pred_trans.data.max(1)
-            if not int(cls.cpu()) == truth[i]:
-                T[1] += 1
+        # print(total, S, T)
 
-            pred_trans = target_model_3(normalizer(adv_inputs))
-            _, cls = pred_trans.data.max(1)
-            if not int(cls.cpu()) == truth[i]:
-                T[2] += 1
+        # import csv
 
-            pred_trans = target_model_4(normalizer(adv_inputs))
-            _, cls = pred_trans.data.max(1)
-            if not int(cls.cpu()) == truth[i]:
-                T[3] += 1
+        # with open("./ColorAdv_{}_cifar.csv".format(args.model), "a") as csvfile:
+        #     writer = csv.writer(csvfile)
+        #     writer.writerow(
+        #         [float(100.0 * S / total), float(100.0 * T[0] / S), float(100.0 * T[1] / S), float(100.0 * T[2] / S),
+        #          float(100.0 * T[3] / S), float(100.0 * T[4] / S), float(100.0 * T[5] / S), float(100.0 * T[6] / S)])
 
-            pred_trans = target_model_5(normalizer(adv_inputs))
-            _, cls = pred_trans.data.max(1)
-            if not int(cls.cpu()) == truth[i]:
-                T[4] += 1
+    success_rate = trans / total * 100
+    sr = list(success_rate)
+    print(f"total: {total}")
+    for n, r in zip(model_name, sr):
+        print(f"SR of {n}: {r:.2f}")
+    print(str(total)+'_'+'_'.join([str(s) for s in sr]))
 
-            pred_trans = target_model_6(normalizer(adv_inputs))
-            _, cls = pred_trans.data.max(1)
-            if not int(cls.cpu()) == truth[i]:
-                T[5] += 1
 
-            pred_trans = target_model_7(normalizer(adv_inputs))
-            _, cls = pred_trans.data.max(1)
-            if not int(cls.cpu()) == truth[i]:
-                T[6] += 1
-
-        print(total, S, T)
-
-        import csv
-
-        with open("./ColorAdv_{}_cifar.csv".format(args.model), "a") as csvfile:
-            writer = csv.writer(csvfile)
-            writer.writerow(
-                [float(100.0 * S / total), float(100.0 * T[0] / S), float(100.0 * T[1] / S), float(100.0 * T[2] / S),
-                 float(100.0 * T[3] / S), float(100.0 * T[4] / S), float(100.0 * T[5] / S), float(100.0 * T[6] / S)])
-
-if __name__=='__main__':
+if __name__ == '__main__':
+    parser = argparse.ArgumentParser(
+        description='PyTorch implementation of SparseFool')
+    parser.add_argument('--dataset', default="GMM_val_data", type=str,
+                        help='path to input img')
+    parser.add_argument('--gt', default="Images_val.csv", type=str,
+                        help='ground truth')
+    parser.add_argument('--model', type=str, default="vgg16")
+    parser.add_argument('--save_path', type=str, help='path to save input img')
+    parser.add_argument('--trial', type=int, default=1, help='trial num')
+    parser.add_argument('--save_fig', default=False, action='store_true',
+                        help='store figure')
     parser = argparse.ArgumentParser()
-    parser.add_argument('--model', help='resnet50, vgg16, inceptionv3', type=str, default='resnet50')
-    parser.add_argument('--iter_num', type=int, default='1')
     args = parser.parse_args()
 
-    main(args)
+    if args.save_path is None:
+        args.save_path = os.path.join("Save", args.dataset.split('/')[-1],
+                                      f"{args.model}", f"attack_{args.trial}")
 
+    main(args)

@@ -1,4 +1,4 @@
-for i in $( seq 0 0 )
+for i in $( seq 1 9 )
 do   
     CUDA_VISIBLE_DEVICES=$1 python attack_cifar.py \
     --dataset ../cifar10test/cifar10_test_${i} \

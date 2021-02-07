@@ -3,15 +3,14 @@ import argparse
 import os
 import sys
 
+import cv2
 import numpy as np
 import pandas as pd
 import torch
 import torch.optim as optim
 from PIL import Image
-from tqdm import tqdm
-import cv2
-
 from torchvision import transforms
+from tqdm import tqdm
 
 import recoloradv.color_spaces as cs
 import recoloradv.color_transformers as ct
@@ -20,9 +19,10 @@ import recoloradv.mister_ed.adversarial_perturbations as ap
 import recoloradv.mister_ed.loss_functions as lf
 import recoloradv.mister_ed.utils.pytorch_utils as utils
 import recoloradv.perturbations as pt
-from cifar10_models.cifar10_models import (densenet121, googlenet,
-                                           inception_v3, mobilenet_v2,
-                                           resnet18, resnet50, vgg16_bn)
+from cifar10_models import (alexnet, densenet121, googlenet,
+                            inception_v3, mobilenet_v2,
+                            resnet18, resnet50, squeezenet1_0,
+                            vgg16_bn)
 
 # module_path = os.path.abspath('mister_ed')
 # if module_path not in sys.path:
@@ -67,7 +67,7 @@ def main(args):
         source_model = resnet50(pretrained=True)
     elif args.model == 'vgg16':
         source_model = vgg16_bn(pretrained=True)
-    elif args.model == 'inceptionv3':
+    elif args.model == 'inception_v3':
         source_model = inception_v3(pretrained=True)
     else:
         raise NotImplementedError('{} is not allowed!'.format(args.model))
@@ -79,8 +79,9 @@ def main(args):
     total = 0
     model_list = []
 
-    model_name = ["resnet50", "resnet18", "vgg16", "densenet121",
-                  "googlenet", "mobilenet_v2", "inception_v3"]
+    # model_name = ["resnet50", "resnet18", "vgg16", "densenet121",
+    #               "googlenet", "mobilenet_v2", "inception_v3", "alexnet", "squeezenet1_0"]
+    model_name = ["squeezenet1_0", "alexnet"]
 
     if "resnet50" in model_name:
         model_list.append(resnet50(pretrained=True))
@@ -96,6 +97,10 @@ def main(args):
         model_list.append(mobilenet_v2(pretrained=True))
     if "inception_v3" in model_name:
         model_list.append(inception_v3(pretrained=True))
+    if "squeezenet1_0" in model_name:
+        model_list.append(squeezenet1_0(pretrained=True))
+    if "alexnet" in model_name:
+        model_list.append(alexnet(pretrained=True))
 
     [model.eval() for model in model_list]
     [model.to(device) for model in model_list]
